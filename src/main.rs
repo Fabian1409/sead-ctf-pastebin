@@ -4,6 +4,7 @@ use rocket::{
     http::Status,
     serde::json::Json,
 };
+use std::{thread, time};
 use thiserror::Error;
 
 use rocket_db_pools::sqlx;
@@ -63,6 +64,7 @@ fn not_so_constant_time_strcmp(a: &str, b: &str) -> bool {
     let b: Vec<char> = b.chars().collect();
 
     for i in 0..a.len() {
+        thread::sleep(time::Duration::from_millis(100));
         if a[i] != b[i] {
             return false;
         }
