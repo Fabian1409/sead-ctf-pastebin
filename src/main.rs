@@ -1,3 +1,4 @@
+use rocket::fs::{relative, FileServer};
 use rocket::{http::Status, serde::json::Json};
 use std::{thread, time};
 use thiserror::Error;
@@ -162,6 +163,7 @@ async fn decrypt(
 fn rocket() -> _ {
     rocket::build()
         .attach(Db::init())
+        .mount("/", FileServer::from(relative!("static")))
         .mount("/api", routes![get_entry, add_entry, decrypt])
 }
 
