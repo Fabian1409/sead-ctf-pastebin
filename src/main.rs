@@ -139,12 +139,6 @@ async fn get_entry(db: Connection<Db>, id: String) -> Result<Json<Entry>, ErrorR
 
 #[post("/add", data = "<entry>")]
 async fn add_entry(db: Connection<Db>, mut entry: Json<Entry>) -> Result<(), ErrorResponse> {
-    if entry.encrypted != 0 {
-        if let Some(key) = &entry.key {
-            entry.content =
-                pad(key, &entry.content).map_err(|err| ErrorResponse { error: Json(err) })?;
-        }
-    }
     Db::add_entry(db, entry.into_inner())
         .await
         .map_err(|err| ErrorResponse { error: Json(err) })
