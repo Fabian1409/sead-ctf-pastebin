@@ -1,5 +1,5 @@
-use rocket::fs::{relative, FileServer};
-use rocket::{http::Status, serde::json::Json};
+use rocket::fs::FileServer;
+use rocket::serde::json::Json;
 use std::{thread, time};
 use thiserror::Error;
 
@@ -15,10 +15,10 @@ extern crate rocket;
 struct Db(sqlx::SqlitePool);
 
 impl Db {
-    async fn get_entry(mut db: Connection<Db>, id: String) -> Option<Entry> {
+    async fn get_entry(mut db: Connection<Db>, id: &str) -> Option<Entry> {
         sqlx::query_as!(
             Entry,
-            "SELECT id, content, password FROM entries WHERE id = ?",
+            "SELECT id, content, encrypted, key FROM entries WHERE id = ?",
             id
         )
         .fetch_one(&mut *db)
@@ -28,10 +28,11 @@ impl Db {
 
     async fn add_entry(mut db: Connection<Db>, entry: Entry) -> Result<(), Error> {
         let res = sqlx::query!(
-            "INSERT INTO entries (id, content, password) VALUES (?, ?, ?)",
+            "INSERT INTO entries (id, content, encrypted, key) VALUES (?, ?, ?, ?)",
             entry.id,
             entry.content,
-            entry.password
+            entry.encrypted,
+            entry.key
         )
         .execute(&mut *db)
         .await;
@@ -39,7 +40,7 @@ impl Db {
         if res.is_ok() {
             Ok(())
         } else {
-            Err(Error::AddEntryError)
+            Err(Error::EntryAlreadyExists)
         }
     }
 }
@@ -48,20 +49,27 @@ impl Db {
 enum Error {
     #[error("key len {key_len} != data len {data_len}")]
     PadDiffLength { key_len: usize, data_len: usize },
-    #[error("failed to add entry")]
-    AddEntryError,
+    #[error("entry already exists")]
+    EntryAlreadyExists,
+    #[error("invaild key")]
+    InvalidKey,
+    #[error("no entry with {0} exits")]
+    EntryNotFound(String),
+    #[error("entry with {0} is not encrypted")]
+    EntryNotEncrypted(String),
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
 struct Entry {
     id: String,
     content: String,
-    password: Option<String>,
+    encrypted: i64,
+    key: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
 struct DecryptRequest {
-    password: String,
+    key: String,
 }
 
 fn pad(key: &str, data: &str) -> Result<String, Error> {
@@ -102,36 +110,29 @@ fn not_so_constant_time_strcmp(a: &str, b: &str) -> bool {
 }
 
 #[get("/get?<id>")]
-async fn get_entry(db: Connection<Db>, id: String) -> Result<Json<Entry>, Status> {
-    let entry = Db::get_entry(db, id);
+async fn get_entry(db: Connection<Db>, id: String) -> Result<Json<Entry>, Json<Error>> {
+    let entry = Db::get_entry(db, &id);
 
     if let Some(entry) = entry.await {
         Ok(Json(Entry {
             id: entry.id,
             content: entry.content,
-            password: None,
+            encrypted: entry.encrypted,
+            key: None,
         }))
     } else {
-        Err(Status::NotFound)
+        Err(Json(Error::EntryNotFound(id)))
     }
 }
 
 #[post("/add", data = "<entry>")]
-async fn add_entry(db: Connection<Db>, mut entry: Json<Entry>) -> Status {
-    if let Some(password) = &entry.password {
-        if let Ok(ct) = pad(password, &entry.content) {
-            entry.content = ct;
-        } else {
-            return Status::InternalServerError;
+async fn add_entry(db: Connection<Db>, mut entry: Json<Entry>) -> Result<(), Json<Error>> {
+    if entry.encrypted != 0 {
+        if let Some(key) = &entry.key {
+            entry.content = pad(key, &entry.content).map_err(Json)?;
         }
     }
-    let res = Db::add_entry(db, entry.into_inner()).await;
-
-    if res.is_ok() {
-        Status::Ok
-    } else {
-        Status::InternalServerError
-    }
+    Db::add_entry(db, entry.into_inner()).await.map_err(Json)
 }
 
 #[post("/decrypt?<id>", data = "<request>")]
@@ -139,23 +140,19 @@ async fn decrypt(
     db: Connection<Db>,
     id: String,
     request: Json<DecryptRequest>,
-) -> Result<String, Status> {
-    if let Some(entry) = Db::get_entry(db, id).await {
-        let password = match &entry.password {
-            Some(password) => password,
-            None => return Err(Status::InternalServerError),
+) -> Result<String, Json<Error>> {
+    if let Some(entry) = Db::get_entry(db, &id).await {
+        let key = match &entry.key {
+            Some(key) => key,
+            None => return Err(Json(Error::EntryNotEncrypted(id))),
         };
-        if not_so_constant_time_strcmp(&request.password, password) {
-            if let Ok(pt) = pad(&request.password, &entry.content) {
-                Ok(pt)
-            } else {
-                Err(Status::InternalServerError)
-            }
+        if not_so_constant_time_strcmp(&request.key, key) {
+            pad(&request.key, &entry.content).map_err(Json)
         } else {
-            Err(Status::InternalServerError)
+            Err(Json(Error::InvalidKey))
         }
     } else {
-        Err(Status::NotFound)
+        Err(Json(Error::EntryNotFound(id)))
     }
 }
 
@@ -163,7 +160,7 @@ async fn decrypt(
 fn rocket() -> _ {
     rocket::build()
         .attach(Db::init())
-        .mount("/", FileServer::from(relative!("static")))
+        .mount("/", FileServer::from("/opt/app/static"))
         .mount("/api", routes![get_entry, add_entry, decrypt])
 }
 

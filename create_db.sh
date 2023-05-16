@@ -5,6 +5,7 @@ sqlite3 db/clipboard.db <<'END_SQL'
 CREATE TABLE entries (
   id TEXT PRIMARY KEY NOT NULL,
   content TEXT NOT NULL,
-  password TEXT
+  encrypted INT NOT NULL,
+  key TEXT
 );
 END_SQL
