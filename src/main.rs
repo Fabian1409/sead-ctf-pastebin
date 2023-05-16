@@ -48,7 +48,7 @@ impl Db {
 #[derive(Error, Debug, Serialize)]
 enum Error {
     #[error("key len {key_len} != data len {data_len}")]
-    PadDiffLength { key_len: usize, data_len: usize },
+    InvalidKeyLen { key_len: usize, data_len: usize },
     #[error("entry already exists")]
     EntryAlreadyExists,
     #[error("invaild key")]
@@ -75,7 +75,7 @@ struct DecryptRequest {
 fn pad(key: &str, data: &str) -> Result<String, Error> {
     use Error::*;
     if key.len() != data.len() {
-        return Err(PadDiffLength {
+        return Err(InvalidKeyLen {
             key_len: key.len(),
             data_len: data.len(),
         });
@@ -92,9 +92,12 @@ fn pad(key: &str, data: &str) -> Result<String, Error> {
     Ok(out)
 }
 
-fn not_so_constant_time_strcmp(a: &str, b: &str) -> bool {
+fn not_so_constant_time_strcmp(a: &str, b: &str) -> Result<(), Error> {
     if a.len() != b.len() {
-        return false;
+        return Err(Error::InvalidKeyLen {
+            key_len: a.len(),
+            data_len: b.len(),
+        });
     }
 
     let a: Vec<char> = a.chars().collect();
@@ -103,10 +106,10 @@ fn not_so_constant_time_strcmp(a: &str, b: &str) -> bool {
     for i in 0..a.len() {
         thread::sleep(time::Duration::from_millis(100));
         if a[i] != b[i] {
-            return false;
+            return Err(Error::InvalidKey);
         }
     }
-    true
+    Ok(())
 }
 
 #[get("/get?<id>")]
@@ -146,11 +149,8 @@ async fn decrypt(
             Some(key) => key,
             None => return Err(Json(Error::EntryNotEncrypted(id))),
         };
-        if not_so_constant_time_strcmp(&request.key, key) {
-            pad(&request.key, &entry.content).map_err(Json)
-        } else {
-            Err(Json(Error::InvalidKey))
-        }
+        not_so_constant_time_strcmp(&request.key, key)?;
+        pad(&request.key, &entry.content).map_err(Json)
     } else {
         Err(Json(Error::EntryNotFound(id)))
     }
