@@ -118,7 +118,6 @@ fn not_so_constant_time_strcmp(a: &str, b: &str) -> Result<(), Error> {
 #[get("/get?<id>")]
 async fn get_entry(db: Connection<Db>, id: String) -> Result<Json<Entry>, ErrorResponse> {
     let entry = Db::get_entry(db, &id);
-
     if let Some(entry) = entry.await {
         Ok(Json(Entry {
             id: entry.id,
@@ -147,14 +146,9 @@ async fn decrypt(
     request: Json<DecryptRequest>,
 ) -> Result<String, ErrorResponse> {
     if let Some(entry) = Db::get_entry(db, &id).await {
-        let key = match &entry.key {
-            Some(key) => key,
-            None => {
-                return Err(ErrorResponse {
-                    error: Json(Error::EntryNotEncrypted(id)),
-                })
-            }
-        };
+        let key = &entry.key.ok_or(ErrorResponse {
+            error: Json(Error::EntryNotEncrypted(id)),
+        })?;
         not_so_constant_time_strcmp(&request.key, key)
             .map_err(|err| ErrorResponse { error: Json(err) })?;
         let key = hex::decode(&request.key).unwrap();
