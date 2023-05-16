@@ -1,4 +1,5 @@
 use rocket::fs::FileServer;
+use rocket::response::Responder;
 use rocket::serde::json::Json;
 use std::{thread, time};
 use thiserror::Error;
@@ -43,6 +44,12 @@ impl Db {
             Err(Error::EntryAlreadyExists)
         }
     }
+}
+
+#[derive(Responder)]
+#[response(status = 500, content_type = "json")]
+struct ErrorResponse {
+    error: Json<Error>,
 }
 
 #[derive(Error, Debug, Serialize)]
@@ -113,7 +120,7 @@ fn not_so_constant_time_strcmp(a: &str, b: &str) -> Result<(), Error> {
 }
 
 #[get("/get?<id>")]
-async fn get_entry(db: Connection<Db>, id: String) -> Result<Json<Entry>, Json<Error>> {
+async fn get_entry(db: Connection<Db>, id: String) -> Result<Json<Entry>, ErrorResponse> {
     let entry = Db::get_entry(db, &id);
 
     if let Some(entry) = entry.await {
@@ -124,18 +131,23 @@ async fn get_entry(db: Connection<Db>, id: String) -> Result<Json<Entry>, Json<E
             key: None,
         }))
     } else {
-        Err(Json(Error::EntryNotFound(id)))
+        Err(ErrorResponse {
+            error: Json(Error::EntryNotFound(id)),
+        })
     }
 }
 
 #[post("/add", data = "<entry>")]
-async fn add_entry(db: Connection<Db>, mut entry: Json<Entry>) -> Result<(), Json<Error>> {
+async fn add_entry(db: Connection<Db>, mut entry: Json<Entry>) -> Result<(), ErrorResponse> {
     if entry.encrypted != 0 {
         if let Some(key) = &entry.key {
-            entry.content = pad(key, &entry.content).map_err(Json)?;
+            entry.content =
+                pad(key, &entry.content).map_err(|err| ErrorResponse { error: Json(err) })?;
         }
     }
-    Db::add_entry(db, entry.into_inner()).await.map_err(Json)
+    Db::add_entry(db, entry.into_inner())
+        .await
+        .map_err(|err| ErrorResponse { error: Json(err) })
 }
 
 #[post("/decrypt?<id>", data = "<request>")]
@@ -143,16 +155,23 @@ async fn decrypt(
     db: Connection<Db>,
     id: String,
     request: Json<DecryptRequest>,
-) -> Result<String, Json<Error>> {
+) -> Result<String, ErrorResponse> {
     if let Some(entry) = Db::get_entry(db, &id).await {
         let key = match &entry.key {
             Some(key) => key,
-            None => return Err(Json(Error::EntryNotEncrypted(id))),
+            None => {
+                return Err(ErrorResponse {
+                    error: Json(Error::EntryNotEncrypted(id)),
+                })
+            }
         };
-        not_so_constant_time_strcmp(&request.key, key)?;
-        pad(&request.key, &entry.content).map_err(Json)
+        not_so_constant_time_strcmp(&request.key, key)
+            .map_err(|err| ErrorResponse { error: Json(err) })?;
+        pad(&request.key, &entry.content).map_err(|err| ErrorResponse { error: Json(err) })
     } else {
-        Err(Json(Error::EntryNotFound(id)))
+        Err(ErrorResponse {
+            error: Json(Error::EntryNotFound(id)),
+        })
     }
 }
 
