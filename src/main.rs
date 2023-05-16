@@ -1,3 +1,4 @@
+use rocket::fs::FileServer;
 use rocket::State;
 use rocket::{http::Status, serde::json::Json};
 use serde::{Deserialize, Serialize};
@@ -157,6 +158,7 @@ fn rocket() -> _ {
     let clipboard = Clipboard::init();
     rocket::build()
         .manage(clipboard)
+        .mount("/", FileServer::from("static"))
         .mount("/api", routes![get_entry, add_entry, decrypt])
 }
 
