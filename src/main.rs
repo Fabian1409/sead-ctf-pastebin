@@ -1,45 +1,35 @@
+use rocket::State;
 use rocket::{http::Status, serde::json::Json};
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 use std::{thread, time};
 use thiserror::Error;
-
-use rocket_db_pools::sqlx;
-use rocket_db_pools::{Connection, Database};
-use serde::{Deserialize, Serialize};
 
 #[macro_use]
 extern crate rocket;
 
-#[derive(Database)]
-#[database("clipboard")]
-struct Db(sqlx::SqlitePool);
+struct Clipboard {
+    entries: Arc<Mutex<HashMap<String, Entry>>>,
+}
 
-impl Db {
-    async fn get_entry(mut db: Connection<Db>, id: String) -> Option<Entry> {
-        sqlx::query_as!(
-            Entry,
-            "SELECT id, content, password FROM entries WHERE id = ?",
-            id
-        )
-        .fetch_one(&mut *db)
-        .await
-        .ok()
+impl Clipboard {
+    fn init() -> Clipboard {
+        Clipboard {
+            entries: Arc::new(Mutex::new(HashMap::new())),
+        }
     }
 
-    async fn add_entry(mut db: Connection<Db>, entry: Entry) -> Result<(), Error> {
-        let res = sqlx::query!(
-            "INSERT INTO entries (id, content, password) VALUES (?, ?, ?)",
-            entry.id,
-            entry.content,
-            entry.password
-        )
-        .execute(&mut *db)
-        .await;
-
-        if res.is_ok() {
-            Ok(())
-        } else {
-            Err(Error::AddEntryError)
+    fn add(&self, entry: Entry) -> Result<(), Error> {
+        let ret = self.entries.lock().unwrap().insert(entry.id.clone(), entry);
+        match ret {
+            Some(_) => Err(Error::DuplicateEntry),
+            None => Ok(()),
         }
+    }
+
+    fn get(&self, id: &str) -> Option<Entry> {
+        self.entries.lock().unwrap().get(id).cloned()
     }
 }
 
@@ -47,20 +37,21 @@ impl Db {
 enum Error {
     #[error("key len {key_len} != data len {data_len}")]
     PadDiffLength { key_len: usize, data_len: usize },
-    #[error("failed to add entry")]
-    AddEntryError,
+    #[error("entry with same id already exists")]
+    DuplicateEntry,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
 struct Entry {
     id: String,
     content: String,
-    password: Option<String>,
+    encrypted: bool,
+    key: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
 struct DecryptRequest {
-    password: String,
+    key: String,
 }
 
 fn pad(key: &str, data: &str) -> Result<String, Error> {
@@ -101,14 +92,15 @@ fn not_so_constant_time_strcmp(a: &str, b: &str) -> bool {
 }
 
 #[get("/get?<id>")]
-async fn get_entry(db: Connection<Db>, id: String) -> Result<Json<Entry>, Status> {
-    let entry = Db::get_entry(db, id);
+fn get_entry(id: String, data: &State<Clipboard>) -> Result<Json<Entry>, Status> {
+    let entry = data.get(&id);
 
-    if let Some(entry) = entry.await {
+    if let Some(entry) = entry {
         Ok(Json(Entry {
             id: entry.id,
             content: entry.content,
-            password: None,
+            encrypted: entry.encrypted,
+            key: None,
         }))
     } else {
         Err(Status::NotFound)
@@ -116,15 +108,17 @@ async fn get_entry(db: Connection<Db>, id: String) -> Result<Json<Entry>, Status
 }
 
 #[post("/add", data = "<entry>")]
-async fn add_entry(db: Connection<Db>, mut entry: Json<Entry>) -> Status {
-    if let Some(password) = &entry.password {
-        if let Ok(ct) = pad(password, &entry.content) {
-            entry.content = ct;
-        } else {
-            return Status::InternalServerError;
+fn add_entry(mut entry: Json<Entry>, data: &State<Clipboard>) -> Status {
+    if entry.encrypted {
+        if let Some(key) = &entry.key {
+            if let Ok(ct) = pad(key, &entry.content) {
+                entry.content = ct;
+            } else {
+                return Status::InternalServerError;
+            }
         }
     }
-    let res = Db::add_entry(db, entry.into_inner()).await;
+    let res = data.add(entry.into_inner());
 
     if res.is_ok() {
         Status::Ok
@@ -134,18 +128,18 @@ async fn add_entry(db: Connection<Db>, mut entry: Json<Entry>) -> Status {
 }
 
 #[post("/decrypt?<id>", data = "<request>")]
-async fn decrypt(
-    db: Connection<Db>,
+fn decrypt(
     id: String,
     request: Json<DecryptRequest>,
+    data: &State<Clipboard>,
 ) -> Result<String, Status> {
-    if let Some(entry) = Db::get_entry(db, id).await {
-        let password = match &entry.password {
-            Some(password) => password,
+    if let Some(entry) = data.get(&id) {
+        let key = match &entry.key {
+            Some(key) => key,
             None => return Err(Status::InternalServerError),
         };
-        if not_so_constant_time_strcmp(&request.password, password) {
-            if let Ok(pt) = pad(&request.password, &entry.content) {
+        if not_so_constant_time_strcmp(&request.key, key) {
+            if let Ok(pt) = pad(&request.key, &entry.content) {
                 Ok(pt)
             } else {
                 Err(Status::InternalServerError)
@@ -160,8 +154,9 @@ async fn decrypt(
 
 #[launch]
 fn rocket() -> _ {
+    let clipboard = Clipboard::init();
     rocket::build()
-        .attach(Db::init())
+        .manage(clipboard)
         .mount("/api", routes![get_entry, add_entry, decrypt])
 }
 
