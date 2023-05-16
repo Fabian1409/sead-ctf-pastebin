@@ -842,6 +842,7 @@ name = "pastebin"
 version = "0.1.0"
 dependencies = [
  "dotenvy",
+ "hex",
  "rocket",
  "rocket_db_pools",
  "serde",

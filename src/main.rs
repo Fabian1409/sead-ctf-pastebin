@@ -79,7 +79,7 @@ struct DecryptRequest {
     key: String,
 }
 
-fn pad(key: &str, data: &str) -> Result<String, Error> {
+fn pad(key: &[u8], data: &[u8]) -> Result<Vec<u8>, Error> {
     use Error::*;
     if key.len() != data.len() {
         return Err(InvalidKeyLen {
@@ -88,13 +88,9 @@ fn pad(key: &str, data: &str) -> Result<String, Error> {
         });
     }
 
-    let data_chars: Vec<char> = data.chars().collect();
-    let key_chars: Vec<char> = key.chars().collect();
-
-    let mut out = String::new();
-    for i in 0..key_chars.len() {
-        let out_char = char::from_u32(u32::from(data_chars[i]) ^ u32::from(key_chars[i]));
-        out.push(out_char.unwrap());
+    let mut out = Vec::new();
+    for i in 0..key.len() {
+        out.push(data[i] ^ key[i]);
     }
     Ok(out)
 }
@@ -138,7 +134,7 @@ async fn get_entry(db: Connection<Db>, id: String) -> Result<Json<Entry>, ErrorR
 }
 
 #[post("/add", data = "<entry>")]
-async fn add_entry(db: Connection<Db>, mut entry: Json<Entry>) -> Result<(), ErrorResponse> {
+async fn add_entry(db: Connection<Db>, entry: Json<Entry>) -> Result<(), ErrorResponse> {
     Db::add_entry(db, entry.into_inner())
         .await
         .map_err(|err| ErrorResponse { error: Json(err) })
@@ -161,7 +157,10 @@ async fn decrypt(
         };
         not_so_constant_time_strcmp(&request.key, key)
             .map_err(|err| ErrorResponse { error: Json(err) })?;
-        pad(&request.key, &entry.content).map_err(|err| ErrorResponse { error: Json(err) })
+        let key = hex::decode(&request.key).unwrap();
+        let data = hex::decode(entry.content).unwrap();
+        let pt = pad(&key, &data).map_err(|err| ErrorResponse { error: Json(err) })?;
+        Ok(hex::encode(pt))
     } else {
         Err(ErrorResponse {
             error: Json(Error::EntryNotFound(id)),
@@ -182,8 +181,8 @@ mod tests {
     use crate::pad;
     #[test]
     fn one_time_pad() {
-        let pt = String::from("0123456789abcdef");
-        let key = String::from("supersecreptkey!");
+        let pt = String::from("0123456789abcdef").into_bytes();
+        let key = String::from("supersecreptkey!").into_bytes();
         let ct = pad(&key, &pt).unwrap();
         assert_eq!(pt, pad(&key, &ct).unwrap());
     }
