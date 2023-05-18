@@ -1,7 +1,8 @@
 use rocket::fs::FileServer;
 use rocket::response::Responder;
 use rocket::serde::json::Json;
-use std::{thread, time};
+use std::thread;
+use std::time::{Duration, Instant};
 use thiserror::Error;
 
 use rocket_db_pools::sqlx;
@@ -58,8 +59,8 @@ enum Error {
     InvalidKeyLen { key_len: usize, data_len: usize },
     #[error("entry already exists")]
     EntryAlreadyExists,
-    #[error("invaild key")]
-    InvalidKey,
+    #[error("invaild key, took {took} ms")]
+    InvalidKey { took: u128 },
     #[error("no entry with {0} exits")]
     EntryNotFound(String),
     #[error("entry with {0} is not encrypted")]
@@ -96,6 +97,7 @@ fn pad(key: &[u8], data: &[u8]) -> Result<Vec<u8>, Error> {
 }
 
 fn not_so_constant_time_strcmp(a: &str, b: &str) -> Result<(), Error> {
+    let start = Instant::now();
     if a.len() != b.len() {
         return Err(Error::InvalidKeyLen {
             key_len: a.len(),
@@ -107,9 +109,11 @@ fn not_so_constant_time_strcmp(a: &str, b: &str) -> Result<(), Error> {
     let b: Vec<char> = b.chars().collect();
 
     for i in 0..a.len() {
-        thread::sleep(time::Duration::from_millis(100));
+        thread::sleep(Duration::from_millis(10));
         if a[i] != b[i] {
-            return Err(Error::InvalidKey);
+            return Err(Error::InvalidKey {
+                took: start.elapsed().as_millis(),
+            });
         }
     }
     Ok(())
